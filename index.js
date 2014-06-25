@@ -6,11 +6,8 @@ var url         = require('url');
 var Record      = require('./lib/record');
 var QueryStream = require('./lib/querystream');
 var FDCStream   = require('./lib/fdcstream');
-var util        = require('./lib/util');
 var faye        = require('faye');
 var mime        = require('mime');
-var zlib        = require('zlib');
-var _           = require('lodash');
 
 // constants
 
@@ -18,112 +15,81 @@ var AUTH_ENDPOINT      = 'https://login.salesforce.com/services/oauth2/authorize
 var TEST_AUTH_ENDPOINT = 'https://test.salesforce.com/services/oauth2/authorize';
 var LOGIN_URI          = 'https://login.salesforce.com/services/oauth2/token';
 var TEST_LOGIN_URI     = 'https://test.salesforce.com/services/oauth2/token';
-var API_VERSIONS       = ['v20.0', 'v21.0', 'v22.0', 'v23.0', 'v24.0', 'v25.0', 'v26.0', 'v27.0', 'v28.0', 'v29.0'];
-var ENVS               = ['sandbox', 'production'];
-var MODES              = ['multi', 'single'];
-
-var plugins = {};
+var API_VERSIONS       = ['v20.0', 'v21.0', 'v22.0', 'v23.0', 'v24.0', 'v25.0', 'v26.0', 'v27.0', 'v28.0', 'v29.0', 'v30.0'];
 
 // nforce connection object
 
 var Connection = function(opts) {
-  var self = this;
-
-  opts = _.defaults(opts || {}, {
-    clientId:      null,
-    clientSecret:  null,
-    redirectUri:   null,
-    loginUri:      LOGIN_URI,
-    testLoginUri:  TEST_LOGIN_URI,
-    cacheMetadata: false,
-    apiVersion:    _.last(API_VERSIONS),
-    environment:   'production',
-    mode:          'multi',
-    gzip:          false,
-    autoRefresh:   false
-  });
-
-  // convert option values
-
-  opts.apiVersion = opts.apiVersion.toString().toLowerCase().replace('v', '').replace('\.0', '');
-  opts.environment = opts.environment.toLowerCase();
-  opts.mode = opts.mode.toLowerCase();
-
-  self = _.assign(this, opts);
-
-  // validate options
-
-  if(!_.isString(this.clientId)) throw new Error('invalid or missing clientId');
-  if(!_.isString(this.clientSecret)) throw new Error('invalid or missing clientSecret');
-  if(!_.isString(this.redirectUri)) throw new Error('invalid or missing redirectUri');
-  if(!_.isString(this.loginUri)) throw new Error('invalid or missing loginUri');
-  if(!_.isString(this.testLoginUri)) throw new Error('invalid or missing testLoginUri');
-  if(!_.isBoolean(this.cacheMetadata)) throw new Error('cacheMetadata must be a boolean');
-  if(!_.isBoolean(this.gzip)) throw new Error('gzip must be a boolean');
-  if(!_.isString(this.environment) || _.indexOf(ENVS, this.environment) === -1) {
-    throw new Error('invalid environment, only ' + ENVS.join(' and ') + ' are allowed');
+  if(!opts) opts = {};
+  if(!opts.clientId  || typeof opts.clientId !== 'string') {
+    throw new Error('Invalid or missing clientId');
+  } else {
+    this.clientId = opts.clientId;
   }
-  if(!_.isString(this.mode) || _.indexOf(MODES, this.mode) === -1) {
-    throw new Error('invalid mode, only ' + MODES.join(' and ') + ' are allowed');
+  if(!opts.clientSecret || typeof opts.clientSecret !== 'string') {
+    throw new Error('Invalid or missing clientSecret');
+  } else {
+    this.clientSecret = opts.clientSecret;
   }
-  
-  // setup cache
+  if(!opts.redirectUri || typeof opts.redirectUri !== 'string') {
+    throw new Error('Invalid or missing redirectUri');
+  } else {
+    this.redirectUri = opts.redirectUri;
+  }
+  // Allow custom login and test uris to be passed in
+  // Addresses issue #5
+  // @zachelrath 11/13/12
+  opts.loginUri && (LOGIN_URI = opts.loginUri);
+  opts.testLoginUri && (TEST_LOGIN_URI = opts.testLoginUri);
 
+  if(typeof opts.cacheMetadata !== 'undefined') {
+    if(typeof opts.cacheMetadata !== 'boolean') throw new Error('cacheMetadata must be a boolean');
+    this.cacheMetadata = opts.cacheMetadata;
+  } else {
+    // caching is defaulted to false
+    this.cacheMetadata = true;
+  }
   if(this.cacheMetadata) {
     this._cache = {
       keyPrefixes: {},
       sObjects: {}
     }
   }
-
-  // parse api version
-
-  try {
-    this.apiVersion = 'v' + parseInt(this.apiVersion, 10) + '.0';
-  } catch (err) {
-    throw new Error('invalid apiVersion number');
-  }
-  if(API_VERSIONS.indexOf(this.apiVersion) === -1) {
-    throw new Error('api version ' + this.apiVersion + ' is not supported');
-  }
-
-  // load plugins
-
-  if(opts.plugins && _.isArray(opts.plugins)) {
-    opts.plugins.forEach(function(pname) {
-      if(!plugins[pname]) throw new Error('plugin ' + pname + ' not found');
-      // clone the object
-      self[pname] = _.clone(plugins[pname]._fns);
-
-      // now bind to the connection object
-      _.forOwn(self[pname], function(fn, key) {
-        self[pname][key] = _.bind(self[pname][key], self);
-      });
-
-    });
-  }
-
-}
-
-// argument parsing
-
-Connection.prototype._getOpts = function(d, c) {
-  var data, callback;
-  if(_.isFunction(c)) {
-    callback = c;
-    data = d;
-  } else if(_.isFunction(d)) {
-    callback = d;
-    data = {};
+  if(opts.apiVersion) {
+    if(typeof opts.apiVersion === 'number') {
+      opts.apiVersion = opts.apiVersion.toString();
+      if(opts.apiVersion.length === 2) opts.apiVersion = opts.apiVersion + '.0';
+    }
+    opts.apiVersion = opts.apiVersion.toLowerCase();
+    if(/^\d\d\.\d$/g.test(opts.apiVersion)) {
+      opts.apiVersion = 'v' + opts.apiVersion;
+    } else if(/^\d\d$/g.test(opts.apiVersion)) {
+      opts.apiVersion = 'v' + opts.apiVersion + '.0';
+    } else if(/^v\d\d$/g.test(opts.apiVersion)) {
+      opts.apiVersion = opts.apiVersion + '.0';
+    }
+    if(API_VERSIONS.indexOf(opts.apiVersion) === -1 ) {
+      throw new Error(opts.apiVersion + ' is an invalid api version');
+    } else {
+      this.apiVersion = opts.apiVersion;
+    }
   } else {
-    callback = function() {};
-    data = d || {};
+    this.apiVersion = API_VERSIONS[API_VERSIONS.length - 1];
   }
-  data.callback = callback;
-  if(this.mode === 'single' && !data.oauth) {
-    data.oauth = this.oauth;
+  if(opts.environment) {
+    if(opts.environment.toLowerCase() == 'sandbox' || opts.environment.toLowerCase() == 'production') {
+      this.environment = opts.environment.toLowerCase();
+    } else {
+      throw new Error(opts.environment + ' is an invalid environment');
+    }
+  } else {
+    this.environment = 'production';
   }
-  return data;
+  if(opts.mode && opts.mode.toLowerCase() === 'single') {
+    this.mode = 'single';
+  } else {
+    this.mode = 'multi';
+  }
 }
 
 // oauth methods
@@ -132,25 +98,31 @@ Connection.prototype.getAuthUri = function(opts) {
   if(!opts) opts = {};
   var urlOpts;
   var self = this;
+  
   urlOpts = {
     'response_type': 'code',
     'client_id': self.clientId,
     'redirect_uri': self.redirectUri
   }
+
   if(opts.display) {
     urlOpts.display = opts.display.toLowerCase();
   }
+
   if(opts.immediate) {
     urlOpts.immediate = opts.immediate;
   }
+
   if(opts.scope) {
     if(typeof opts.scope === 'object') {
       urlOpts.scope = opts.scope.join(' ');
     }
   }
+
   if(opts.state) {
     urlOpts.state = opts.state;
   }
+
   if(self.environment == 'sandbox') {
     return TEST_AUTH_ENDPOINT + '?' + qs.stringify(urlOpts);
   } else {
@@ -158,73 +130,105 @@ Connection.prototype.getAuthUri = function(opts) {
   }
 }
 
-Connection.prototype.authenticate = function(data, callback) {
+Connection.prototype.authenticate = function(opts, callback) {
+  var uri, reqOpts, bodyOpts;
   var self = this;
-  var opts = this._getOpts(data, callback);
-  opts.uri = (self.environment == 'sandbox') ? this.testLoginUri : this.loginUri;
-  opts.method = 'POST';
-  opts.headers = {
-    'Content-Type': 'application/x-www-form-urlencoded'
-  }
-  var bopts = {
+
+  if(!callback) callback = function(){}
+
+  if(!opts) opts = {};
+
+  bodyOpts = {
     'client_id': self.clientId,
-    'client_secret': self.clientSecret
-  };
+    'client_secret': self.clientSecret,
+  }
+
   if(opts.code) {
-    bopts['grant_type'] = 'authorization_code';
-    bopts['code'] = opts.code;
-    bopts['redirect_uri'] = self.redirectUri;
+    bodyOpts['grant_type'] = 'authorization_code';
+    bodyOpts['code'] = opts.code;
+    bodyOpts['redirect_uri'] = self.redirectUri;
   } else if(opts.username && opts.password) {
-    bopts['grant_type'] = 'password';
-    bopts['username'] = opts.username;
-    bopts['password'] = opts.password;
+    bodyOpts['grant_type'] = 'password';
+    bodyOpts['username'] = opts.username;
+    bodyOpts['password'] = opts.password;
     if(opts.securityToken) {
-      bopts['password'] = bopts['password'] + opts.securityToken;
+      bodyOpts['password'] = bodyOpts['password'] + opts.securityToken;
     }
-  } 
-  opts.body = qs.stringify(bopts);
-  return this._apiAuthRequest(opts, opts.callback);
-}
-
-Connection.prototype.refreshToken = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  console.log(opts);
-  opts.uri = (this.environment == 'sandbox') ? this.testLoginUri : this.loginUri;
-  opts.method = 'POST';
-  opts.body = qs.stringify({
-    'client_id': this.clientId,
-    'client_secret': this.clientSecret,
-    'grant_type': 'refresh_token',
-    'redirect_uri': this.redirectUri,
-    'refresh_token': opts.oauth.refresh_token
-  });
-  opts.headers = {
-    'Content-Type': 'application/x-www-form-urlencoded'
-  }
-  return this._apiAuthRequest(opts, opts.callback);
-}
-
-Connection.prototype.revokeToken = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  if(this.environment === 'sandbox') {
-    opts.uri = 'https://test.salesforce.com/services/oauth2/revoke';
   } else {
-    opts.uri = 'https://login.salesforce.com/services/oauth2/revoke';
+    return callback(new Error('You must either supply a code, or username and password'));
   }
-  opts.uri += '?token=' + opts.token;
-  if(opts.callbackParam) {
-    opts.uri += '&callback=' + opts.callbackParam;
+
+  uri = (self.environment == 'sandbox') ? TEST_LOGIN_URI : LOGIN_URI;
+
+  reqOpts = {
+    uri: uri,
+    method: 'POST',
+    body: qs.stringify(bodyOpts),
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded'
+    }
   }
-  return this._apiAuthRequest(opts, opts.callback)
+  
+  return this._apiAuthRequest(reqOpts, callback);
+
+}
+
+
+Connection.prototype.refreshToken = function(oauth, callback) {
+  var uri, reqOpts, bodyOpts;
+  var self = this;
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 1) callback = args[0];
+  }
+
+  if(!callback) callback = function(){};
+
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  if(!oauth.refresh_token) return callback(new Error('You must supply a refresh token'));
+
+  bodyOpts = {
+    'client_id': self.clientId,
+    'client_secret': self.clientSecret,
+    'grant_type': 'refresh_token',
+    'redirect_uri': self.redirectUri,
+    'refresh_token': oauth.refresh_token
+  }
+
+  uri = (self.environment == 'sandbox') ? TEST_LOGIN_URI : LOGIN_URI;
+
+  reqOpts = {
+    uri: uri,
+    method: 'POST',
+    body: qs.stringify(bodyOpts),
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded'
+    }
+  }
+
+  return this._apiAuthRequest(reqOpts, callback);
 }
 
 // api methods
 
-Connection.prototype.getIdentity = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.uri = opts.oauth.id;
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
+Connection.prototype.getIdentity = function(oauth, callback) {
+  var opts;
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 1) callback = args[0];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  opts = { uri: oauth.id, method: 'GET'}
+  
+  return this._apiRequest(opts, oauth, null, callback);
 }
 
 Connection.prototype.getVersions = function(callback) {
@@ -237,21 +241,46 @@ Connection.prototype.getVersions = function(callback) {
   return this._apiAuthRequest(opts, callback);
 }
 
-Connection.prototype.getResources = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.resource = '/';
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
+Connection.prototype.getResources = function(oauth, callback) {
+  var uri, opts;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 1) callback = args[0];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion;
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiRequest(opts, oauth, null, callback);
 }
 
-Connection.prototype.getSObjects = function(data, callback) {
+Connection.prototype.getSObjects = function(oauth, callback) {
+  var uri, opts;
   var self = this;
-  var opts = this._getOpts(data, callback);
-  opts.resource = '/sobjects';
-  opts.method = 'GET'; 
-  return this._apiRequest(opts, function(err, resp){
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 1) callback = args[0];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects';
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiRequest(opts, oauth, null, function(err, resp){
     if(err) {
-      opts.callback(err, null);
+      callback(err, null);
     } else {
       if(self.cacheMetadata) {
         for(var obj in resp.sobjects) {
@@ -259,176 +288,433 @@ Connection.prototype.getSObjects = function(data, callback) {
           if(so.keyPrefix != null) self._cache.keyPrefixes[so.keyPrefix] = so.name;
         }
       }
-      opts.callback(null, resp);
+      callback(null, resp);
     }
   });
 }
 
-Connection.prototype.getMetadata = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.resource = '/sobjects/' + opts.type;
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
-}
+Connection.prototype.getMetadata = function(data, oauth, callback) {
+  var uri, opts;
 
-Connection.prototype.getDescribe = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.resource = '/sobjects/' + opts.type + '/describe';
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
-}
-
-function getMultipart(opts) {
-  var type = opts.sobject.getType();
-  var entity = (type === 'contentversion') ? 'content' : type;
-  var name   = (type === 'contentversion') ? 'VersionData' : 'Body';
-  var fileName = opts.sobject.getFileName();
-  var isPatch = (opts.method === 'PATCH') ? true : false;
-  var multipart = [];
-  multipart.push({
-    'content-disposition': 'form-data; name="entity_' + entity + '"',
-    'content-type': 'application/json',
-    body: JSON.stringify(opts.sobject._getPayload(isPatch))
-  });
-  multipart.push({
-    'content-type': mime.lookup(fileName),
-    'content-disposition': 'form-data; name="' + name + '"; filename="' + fileName + '"',
-    body: opts.sobject.getBody()
-  });
-  return multipart;
-}
-
-Connection.prototype.insert = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  var type = opts.sobject.getType();
-  opts.resource = '/sobjects/' + type;
-  opts.method = 'POST';
-  if(type === 'document' || type === 'attachment' || type === 'contentversion') {
-    opts.multipart = getMultipart(opts); 
-  } else {
-    opts.body = JSON.stringify(opts.sobject._getPayload(false));
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
   }
-  return this._apiRequest(opts, opts.callback);
-}
-
-Connection.prototype.update = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  var type = opts.sobject.getType();
-  var id = opts.sobject.getId();
-  opts.resource = '/sobjects/' + type + '/' + id;
-  opts.method = 'PATCH';
-  if(type === 'document' || type === 'attachment' || type === 'contentversion') {
-    opts.multipart = getMultipart(opts); 
-  } else {
-    opts.body = JSON.stringify(opts.sobject._getPayload(true));
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
   }
-  return this._apiRequest(opts, opts.callback);
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/' + data;
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiRequest(opts, oauth, null, callback);
 }
 
-Connection.prototype.upsert = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  var type = opts.sobject.getType();
-  var extIdField = opts.sobject.getExternalIdField();
-  var extId = opts.sobject.getExternalId();
-  opts.resource = '/sobjects/' + type + '/' + extIdField + '/' + extId;
-  opts.method = 'PATCH';
-  opts.body = JSON.stringify(opts.sobject._getPayload(false));
-  return this._apiRequest(opts, opts.callback);
+Connection.prototype.getDescribe = function(data, oauth, callback) {
+  var uri, opts;
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/' + data + '/describe';
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiRequest(opts, oauth, null, callback);
 }
 
-Connection.prototype.delete = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  var type = opts.sobject.getType();
-  var id = opts.sobject.getId();
-  opts.resource = '/sobjects/' + type + '/' + id;
-  opts.method = 'DELETE';
-  return this._apiRequest(opts, opts.callback);
+Connection.prototype.insert = function(data, oauth, callback) {
+  var type, opts, entity, name, fieldvalues;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  fieldvalues = data.getFieldValues();
+  
+  if(typeof fieldvalues !== 'object') {
+    return callback(new Error('fieldValues must be in the form of an object'), null);
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  opts = { 
+    uri: oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/' + type, 
+    method: 'POST' 
+  };
+  
+  if(type === 'document' || type === 'attachment' || type === 'contentversion') {
+    entity = (type === 'contentversion') ? 'content' : type;
+    name   = (type === 'contentversion') ? 'VersionData' : 'Body';
+    opts.multipart = [
+      {
+        'content-disposition': 'form-data; name="entity_' + entity + '"',
+        'content-type': 'application/json',
+        body: JSON.stringify(fieldvalues)
+      },
+      {
+        'content-type': mime.lookup(data.attachment.fileName),
+        'content-disposition': 'form-data; name="' + name + '"; filename="' + data.attachment.fileName + '"',
+        body: data.attachment.body
+      }
+    ]; 
+  } else {
+    opts.body = JSON.stringify(fieldvalues);
+  }
+  
+  return this._apiRequest(opts, oauth, data, callback);
+}
+
+Connection.prototype.update = function(data, oauth, callback) {
+  var type, opts, entity, name, id, fieldvalues;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  if(!(id = findId(data))) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  fieldvalues = data.getFieldValues();
+  
+  if(typeof fieldvalues !== 'object') {
+    return callback(new Error('fieldValues must be in the form of an object'), null);
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  opts = { 
+    uri: oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/' + type + '/' + id, 
+    method: 'PATCH' 
+  };
+  
+  if(type === 'document' || type === 'attachment' || type === 'contentversion') {
+    entity = (type === 'contentversion') ? 'content' : type;
+    name   = (type === 'contentversion') ? 'VersionData' : 'Body';
+    opts.multipart = [
+      {
+        'content-disposition': 'form-data; name="entity_' + entity + '"',
+        'content-type': 'application/json',
+        body: JSON.stringify(fieldvalues)
+      },
+      {
+        'content-type': mime.lookup(data.attachment.fileName),
+        'content-disposition': 'form-data; name="' + name + '"; filename="' + data.attachment.fileName + '"',
+        body: data.attachment.body
+      }
+    ];
+  } else {
+    opts.body = JSON.stringify(fieldvalues);
+  }
+  
+  return this._apiRequest(opts, oauth, data, callback);
+}
+
+Connection.prototype.upsert = function(data, oauth, callback) {
+  var type, fieldvalues, uri, opts;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  if(!data.attributes.externalId || !data.attributes.externalIdField) {
+    return callback(new Error('Invalid external id or external id field'));
+  }
+  
+  fieldvalues = data.getFieldValues();
+  
+  if(typeof fieldvalues !== 'object') {
+    return callback(new Error('fieldValues must be in the form of an object'), null);
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/'
+    + type + '/' + data.attributes.externalIdField + '/' + data.attributes.externalId;
+  opts = { uri: uri, method: 'PATCH', body: JSON.stringify(fieldvalues) }
+  
+  return this._apiRequest(opts, oauth, data, callback);
+}
+
+Connection.prototype.delete = function(data, oauth, callback) {
+  var type, uri, opts, id;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  if(!(id = findId(data))) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/'
+    + type + '/' + data.getId();
+  opts = { uri: uri, method: 'DELETE' }
+  
+  return this._apiRequest(opts, oauth, data, callback);
 }
 
 Connection.prototype.getRecord = function(data, oauth, callback) {
-  var opts = this._getOpts(data, callback);
-  var type = (opts.sobject) ? opts.sobject.getType() : opts.type;
-  var id = (opts.sobject) ? opts.sobject.getId() : opts.id;
-  opts.resource = '/sobjects/' + type + '/' + id;
-  opts.method = 'GET';
-  if(opts.fields) {
-    if(_.isString(opts.fields)) {
-      opts.fields = [opts.fields];
-    } 
-    opts.resource + '?' + qs.stringify({ fields: opts.fields.join() });
+  var type, uri, opts, id, query;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
   }
-  return this._apiRequest(opts, function(err, resp){
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  if(!(id = findId(data))) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/'
+    + type + '/' + id;
+  
+  if(data.fields) {
+    query = {}
+    if(typeof data.fields === 'string') {
+      query.fields = data.fields;
+    } else if(typeof data.fields === 'object' && data.fields.length) {
+      query.fields = data.fields.join();
+    }
+    uri += '?' + qs.stringify(query);
+  }
+  
+  opts = { uri: uri, method: 'GET'}
+  
+  return this._apiRequest(opts, oauth, null, function(err, resp){
     if(!err) {
       resp = new Record(resp);
     }
-    opts.callback(err, resp);
+    callback(err, resp);
   });
 }
 
 // blob methods
 
-Connection.prototype.getBody = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  var type = (opts.sobject) ? opts.sobject.getType() : opts.type;
+Connection.prototype.getBody = function(data, oauth, callback) {
+  var type, id, uri;
   
-  type = opts.type.toLowerCase();
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){};
+  
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  if(!(id = findId(data))) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
   
   if(type === 'document') {
-    return this.getDocumentBody(opts, opts.callback);
+    return this.getDocumentBody(id, oauth, callback);
   } else if(type === 'attachment') {
-    return this.getAttachmentBody(opts, opts.callback);
+    return this.getAttachmentBody(id, oauth, callback);
   } else if(type === 'contentversion') {
-    return this.getContentVersionBody(opts, opts.callback);
+    return this.getContentVersionBody(id, oauth, callback);
   } else {
-    return opts.callback(new Error('invalid type: ' + type));
+    return callback(new Error('sobject is of invalid type: ' + type));
   }
 }
 
-Connection.prototype.getAttachmentBody = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  var id = (opts.sobject) ? sobject.getId() : opts.id;
-  opts.resource = '/sobjects/attachment/' + id + '/body';
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
+Connection.prototype.getAttachmentBody = function(id, oauth, callback) {
+  var uri, opts;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){};
+  
+  if(typeof id === 'object') id = findId(id);
+  
+  if(!id) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  uri = oauth.instance_url + '/services/data' + this.apiVersion 
+    + '/sobjects/Attachment/' + id + '/body'
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiBlobRequest(opts, oauth, function(err, resp) {
+    callback(err, resp);
+  });
 }
 
 Connection.prototype.getDocumentBody = function(id, oauth, callback) {
-  var opts = this._getOpts(data, callback);
-  var id = (opts.sobject) ? sobject.getId() : opts.id;
-  opts.resource = '/sobjects/document/' + id + '/body';
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
+  var uri, opts;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){};
+  
+  if(typeof id === 'object') id = findId(id);
+  
+  if(!id) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  uri = oauth.instance_url + '/services/data' + this.apiVersion 
+    + '/sobjects/Document/' + id + '/body'
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiBlobRequest(opts, oauth, function(err, resp) {
+    callback(err, resp);
+  });
 }
 
 Connection.prototype.getContentVersionBody = function(id, oauth, callback) {
-  var opts = this._getOpts(data, callback);
-  var id = (opts.sobject) ? sobject.getId() : opts.id;
-  opts.resource = '/sobjects/contentversion/' + id + '/body';
-  opts.method = 'GET';
-  return this._apiRequest(opts, opts.callback);
+  var uri, opts;
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+
+  if(!callback) callback = function(){};
+  
+  if(typeof id === 'object') id = findId(id);
+  
+  if(!id) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  uri = oauth.instance_url + '/services/data' + this.apiVersion 
+    + '/sobjects/ContentVersion/' + id + '/body'
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiBlobRequest(opts, oauth, function(err, resp) {
+    callback(err, resp);
+  });
 }
 
-Connection.prototype._queryHandler = function(data, callback) {
+Connection.prototype._queryHandler = function(query, oauth, all, callback) {
+  var uri, opts, stream;
   var self = this;
   var recs = [];
-  var stream = new QueryStream();
-  var opts = this._getOpts(data, callback);
-  opts.method = 'GET';
-  opts.resource = '/query';
-  if(opts.all) {
-    opts.resource += 'All';
-  }
-  opts.qs = {
-    q: opts.query
+
+  if(!callback) callback = function(){}
+
+  stream = new QueryStream();
+
+  if(typeof query !== 'string') {
+    return callback(new Error('You must specify a query'));
   }
 
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+
   var queryNext = function(url) {
-    self.getUrl({ url: url, oauth: opts.oauth }, function(err, resp) {
+    self.getUrl(url, oauth, function(err, resp) {
       if (err) {
         return stream.error(err);
       }
-      var write_more = function () {
-        if(resp.records && resp.records.length > 0) {
+      if(resp.records && resp.records.length > 0) {
+        stream.write(JSON.stringify(resp));
+      }
+      if(resp.nextRecordsUrl) {
+        queryNext(resp.nextRecordsUrl);
+      } else {
+        stream.end();
+      }
+    });
+  }
+
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/query';
+
+  // support queryAll
+  if(all) uri += 'All';
+
+  opts = { uri: uri, method: 'GET', qs: { q: query } }
+  
+  this._apiRequest(opts, oauth, null, function(err, resp){
+    if (stream.isStreaming()) {
+      if (err) {
+        stream.error(err);
+      }
+      else {
+        if(resp) {
           stream.write(JSON.stringify(resp));
         }
         if(resp.nextRecordsUrl) {
@@ -436,37 +722,9 @@ Connection.prototype._queryHandler = function(data, callback) {
         } else {
           stream.end();
         }
-      };
-      if (stream.writable) {
-        write_more();
-      } else {
-        stream.once('resume', write_more);
       }
-    });
-  }
-  
-  this._apiRequest(opts, function(err, resp){
-    if(stream.isStreaming()) {
-      if (err) {
-        stream.error(err);
-      } else {
-        if(resp) {
-          var write_more = function () {
-            stream.write(JSON.stringify(resp));
-            if(resp.nextRecordsUrl) {
-              queryNext(resp.nextRecordsUrl);
-            } else {
-              stream.end();
-            }
-          };
-          if (stream.writable) {
-            write_more();
-          } else {
-            stream.once('resume', write_more);
-          }
-        }
-      }
-    } else {
+    }
+    else {
       if(!err) {
         if(resp.records && resp.records.length > 0) {
           for(var i=0; i<resp.records.length; i++) {
@@ -475,38 +733,52 @@ Connection.prototype._queryHandler = function(data, callback) {
           resp.records = recs;
         }
       }
-      opts.callback(err, resp);
+      callback(err, resp);
     }
   });
 
   return stream;
 }
 
-Connection.prototype.query = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.all = false;
-  return this._queryHandler(opts, callback);
+Connection.prototype.query = function(query, oauth, callback) {
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length === 2) callback = args[1];
+  }
+  return this._queryHandler(query, oauth, false, callback);
 }
 
-Connection.prototype.queryAll = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.all = true;
-  return this._queryHandler(opts, callback);
+Connection.prototype.queryAll = function(query, oauth, callback) {
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length === 2) callback = args[1];
+  }
+  return this._queryHandler(query, oauth, true, callback);
 }
 
-/**
- * data
- * - search: string
- * - oauth: object
- */
-
-Connection.prototype.search = function(data, callback) {
-  var opts = this._getOpts(data, callback);
+Connection.prototype.search = function(search, oauth, callback) {
   var uri, opts;
-  opts.resource = '/search';
-  opts.method = 'GET';
-  opts.qs = { q: opts.search }; 
-  return this._apiRequest(opts, function(err, resp){
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+
+  if(!callback) callback = function(){};
+
+  if(typeof search !== 'string') {
+    return callback(new Error('Search must be in string form'), null);
+  }
+
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + '/services/data/' + this.apiVersion + '/search';
+  opts = { uri: uri, method: 'GET', qs: { q: search } }
+  
+  return this._apiRequest(opts, oauth, null, function(err, resp){
     if(!err) {
       if(resp.length) {
         var recs = [];
@@ -516,54 +788,116 @@ Connection.prototype.search = function(data, callback) {
         resp = recs;
       }
     }
-    opts.callback(err, resp);
+    callback(err, resp);
   });
 }
 
-Connection.prototype.getUrl = function(data, callback) {
-  var opts = this._getOpts(data, callback);
-  opts.uri = opts.oauth.instance_url + data.url;
-  opts.method = 'GET';
-  return this._apiRequest(opts, callback);
+Connection.prototype.getUrl = function(url, oauth, callback) {
+  var uri, opts;
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof url !== 'string') {
+    return callback(new Error('Url must be in string form'), null);
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  uri = oauth.instance_url + url;
+  opts = { uri: uri, method: 'GET' }
+  
+  return this._apiRequest(opts, oauth, null, callback);
 }
 
 // chatter api methods
 
 // apex rest
 
-Connection.prototype.apexRest = function(data, callback) {
-  // need to specify resource
-  var opts = this._getOpts(data, callback);
-  opts.uri = opts.oauth.instance_url + '/services/apexrest/' + data.uri;
-  opts.method = opts.method || 'GET';
-  if(opts.urlParams) {
-    opts.qs = opts.urlParams;
+Connection.prototype.apexRest = function(restRequest, oauth, callback) {
+  var uri, opts, params, method;
+
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
   }
-  return this._apiRequest(opts, opts.callback);
+
+  if(!callback) callback = function(){};
+
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  if(typeof restRequest !== 'object') {
+    return callback(new Error('You must specify a restRequest object'), null);
+  }
+  
+  if(typeof restRequest.uri !== 'string') {
+    return callback(new Error('You must specify a url with the type string'), null);
+  }
+  
+  if(typeof restRequest.method === 'string' ) {
+    method = restRequest.method;
+    if(method !=='GET' && method !=='POST' && method !=='PATCH' && method !=='PUT')
+    return callback(new Error('Only GET, POST, PATCH, & PUT are supported, you specified: '+ method), null);
+  }
+  //default to GET
+  if(restRequest.method==null || typeof restRequest.method !== 'string'){
+    restRequest.method = 'GET';
+  }
+  
+  uri = oauth.instance_url + '/services/apexrest/' + restRequest.uri;
+  opts = { uri: uri, method: restRequest.method}
+  
+  if(restRequest.body!=null) {
+    opts.body = typeof restRequest.body === 'string' ? restRequest.body : JSON.stringify(restRequest.body);
+  }
+
+  if(restRequest.urlParams!=null) {
+    if(!Array.isArray(restRequest.urlParams)) {
+      return callback(new Error('URL parmams must be an array in form of [{key:\'key\', value:\'value\'}]'), null);
+    }
+    
+    params = '?';
+    
+    for(i = 0; i<restRequest.urlParams.length; i++){
+      if(i>0) params+='&'
+      params+=restRequest.urlParams[i].key+'='+restRequest.urlParams[i].value;
+    }
+    
+    opts.uri+=params;
+  }
+
+  return this._apiRequest(opts, oauth, null, callback);
 }
 
 // streaming methods
 
-Connection.prototype.stream = function(data) {
-  var that = this;
-  var opts = this._getOpts(data);
-  var client, endpoint;
+Connection.prototype.stream = function(data, oauth) {
+  var str, endpoint, client, sub;
+
+  if(this.mode === 'single') {
+    oauth = this.oauth;
+  }
 
   str = new FDCStream();
-
-  endpoint = opts.oauth.instance_url + '/cometd/' + that.apiVersion.substring(1);
-
+  endpoint = oauth.instance_url + '/cometd/' + this.apiVersion.substring(1);
+  
   client = new faye.Client(endpoint, {});
-  client.setHeader('Authorization', 'OAuth ' + opts.oauth.access_token);
-
-  sub = client.subscribe('/topic/' + opts.topic, function(d){
-    str.write(d);
+  client.setHeader('Authorization', 'OAuth ' + oauth.access_token);
+  
+  sub = client.subscribe('/topic/' + data, function(data){
+    str.write(data);
   });
-
+  
   sub.callback(function(){
     str.emit('connect');
   });
-
+  
   sub.errback(function(error) {
     str.emit('error', error);
   });
@@ -622,12 +956,68 @@ Connection.prototype.expressOAuth = function(opts) {
 }
 
 Connection.prototype.updatePassword = function(data, oauth, callback) {
-  var opts = this._getOpts(data, callback);
-  var id = data.sobject.getId();
-  opts.resource = '/sobjects/user/' + id + '/password';
-  opts.method = 'POST';
-  opts.body = JSON.stringify(data.sobject._getPayload(false));  
-  return this._apiRequest(opts, callback);
+  var type, opts, entity, name, id, fieldvalues;
+  
+  if(this.mode === 'single') {
+    var args = Array.prototype.slice.call(arguments);
+    oauth = this.oauth;
+    if(args.length == 2) callback = args[1];
+  }
+  
+  if(!callback) callback = function(){}
+  
+  if(typeof data.attributes.type !== 'string') {
+    return callback(new Error('Type must be in the form of a string'), null);
+  }
+  
+  type = data.attributes.type.toLowerCase();
+  
+  if(!(id = findId(data))) {
+    return callback(new Error('You must specify an id in the form of a string'));
+  }
+  
+  fieldvalues = data.getFieldValues();
+  
+  if(typeof fieldvalues !== 'object') {
+    return callback(new Error('fieldValues must be in the form of an object'), null);
+  }
+  
+  if(!validateOAuth(oauth)) return callback(new Error('Invalid oauth object argument'), null);
+  
+  opts = { 
+    uri: oauth.instance_url + '/services/data/' + this.apiVersion + '/sobjects/User/' + id + '/password', 
+    method: 'POST'
+  };
+  
+  opts.body = JSON.stringify(fieldvalues);  
+  return this._apiRequest(opts, oauth, data, callback);
+}
+
+// utility methods
+
+var validateOAuth = function(oauth) {
+  if(!oauth || !oauth.instance_url || !oauth.access_token) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+var findId = function(data) {
+  if(data.getId && typeof data.getId === 'function') {
+    return data.getId();
+  } else if(data.Id) {
+    return data.Id
+  } if(data.id) {
+    return data.id;
+  } else if(data.ID) {
+    return data.ID;
+  }
+}
+
+var isJsonResponse = function(res) {
+  return res.headers && res.headers['content-type'] 
+    && res.headers['content-type'].split(';')[0].toLowerCase() === 'application/json';
 }
 
 var errors = {
@@ -653,17 +1043,14 @@ Connection.prototype._apiAuthRequest = function(opts, callback) {
     // request didn't return a response. sumptin bad happened
     if(!res) return callback(errors.emptyResponse());
 
-    if(body && util.isJsonResponse(res)) {
+    if(body && isJsonResponse(res)) {
       try {
         body = JSON.parse(body);
       } catch (e) {
         return callback(errors.invalidJson());
       }
     } else {
-      // removing this for now since calling the _apiAuthRequest when
-      // revoking an oauth token doesn't return a JSON response, just
-      // a 200 response with an empty body.
-      // return callback(errors.nonJsonResponse());
+      return callback(errors.nonJsonResponse());
     }
 
     if(res.statusCode === 200) {
@@ -681,75 +1068,66 @@ Connection.prototype._apiAuthRequest = function(opts, callback) {
   });
 }
 
-Connection.prototype._apiRequest = function(opts, callback) {
+Connection.prototype._apiBlobRequest = function(opts, oauth, callback) {
 
-  /**
-   * options:
-   * - sobject
-   * - uri
-   * - callback
-   * - oauth
-   * - multipart
-   * - method
-   * - body
-   * - qs
-   */
+  opts.headers = {
+    'content-type': 'application/json',
+    'Authorization': 'Bearer ' + oauth.access_token
+  }
 
-  var self = this;
-  var ropts = {};
-  var callback = callback || function() {};
-  var sobject = opts.sobject;
+  return request(opts, function(err, res, body) {
+    // request returned an error
+    if(err) return callback(err, null);
 
-  // construct uri
+    // request didn't return a response. sumptin bad happened
+    if(!res) return callback(errors.emptyResponse());
 
-  if(opts.uri) {
-    ropts.uri = opts.uri;
-  } else {
-    if(!opts.resource || opts.resource.charAt(0) !== '/') {
-      opts.resource = '/' + (opts.resource || '');
+    // salesforce returned no body but an error in the header
+    if(!body && res.headers && res.headers.error) {
+      return callback(new Error(res.headers.error), null);
     }
-    ropts.uri = opts.oauth.instance_url 
-      + '/services/data/' 
-      + this.apiVersion 
-      + opts.resource;
-  }
 
-  ropts.method = opts.method || 'GET';
+    // salesforce returned an ok of some sort
+    if(res.statusCode >= 200 && res.statusCode <= 204) {
+      return callback(null, body);
+    } 
 
-  // set headers
+    // salesforce returned an error with a body
+    if(body) {
+      if(isJsonResponse(res)) {
+        try {
+          body = JSON.parse(body);
+        } catch (e) {
+          return callback(errors.invalidJson());
+        }
+        err = new Error(body[0].message);
+        err.errorCode = body[0].errorCode;
+        err.statusCode = res.statusCode;
+        err.messageBody = body[0].message;
+        return callback(err, null);
+      } 
+    } 
+    
+    // we don't know what happened
+    return callback(new Error('Salesforce returned no body and status code ' + res.statusCode));
 
-  ropts.headers = {};
+  });
+}
 
-  ropts.headers['Accept'] = 'application/json;charset=UTF-8';
+Connection.prototype._apiRequest = function(opts, oauth, sobject, callback) {
 
-  if(opts.oauth) {
-    ropts.headers['Authorization'] = 'Bearer ' + opts.oauth.access_token;
-  }
-
-  if(opts.method === 'GET' && this.gzip === true) {
-    ropts.headers['Accept-Encoding'] = 'gzip';
-    ropts.encoding = null;
+  opts.headers = {
+    'Authorization': 'Bearer ' + oauth.access_token,
+    'Accept': 'application/json;charset=UTF-8'
   }
 
   if(opts.multipart) {
-    ropts.multipart = opts.multipart;
-    ropts.headers['content-type'] = 'multipart/form-data';
+    opts.headers['content-type'] = 'multipart/form-data';
   } else {
-    ropts.headers['content-type'] = 'application/json';
+    opts.headers['content-type'] = 'application/json';
   }
-
-  // set body
-
-  if(opts.body) {
-    ropts.body = opts.body;
-  }
-
-  // process qs
-  if(opts.qs) {
-    ropts.qs = opts.qs;
-  }
-
-  return request(ropts, function(err, res, body) {
+  
+  return request(opts, function(err, res, body) {
     
     // request returned an error
     if(err) return callback(err, null);
@@ -762,132 +1140,56 @@ Connection.prototype._apiRequest = function(opts, callback) {
       return callback(new Error(res.headers.error), null);
     }
 
-    var processResponse = function(data) {
-      // attempt to parse the json now
-      if(util.isJsonResponse(res)) {
-        if(data) {
-          try {
-            data = JSON.parse(data);
-          } catch (e) {
-            return callback(errors.invalidJson());
-          }
+    // attempt to parse the json now
+    if(isJsonResponse(res)) {
+      if(body) {
+        try {
+          body = JSON.parse(body);
+        } catch (e) {
+          return callback(errors.invalidJson());
         }
       }
+    } 
 
-      // salesforce returned an ok of some sort
-      if(res.statusCode >= 200 && res.statusCode <= 204) {
-        // attach the id back to the sobject on insert
-        if(sobject) {
-          if(sobject._reset) {
-            sobject._reset();
-          }
-          if(data && data.id) {
-            sobject._fields.id = data.id;
-          }
-        }
-        return callback(null, data);
-      }
+    // salesforce returned an ok of some sort
+    if(res.statusCode >= 200 && res.statusCode <= 204) {
+      // attach the id back to the sobject on insert
+      if(sobject && body && body.id && !sobject.Id && !sobject.id && !sobject.ID) sobject.Id = body.id;
+      return callback(null, body);
+    } 
 
-      // salesforce returned an error with a body
-      if (data) {
-        var e;
-        if (Array.isArray(data) && data.length > 0) {
-          e = new Error(data[0].message);
-          e.errorCode = data[0].errorCode;
-          e.messageBody = data[0].message;
-        } else {
-          //  didn't get a json response back -- just a simple string as the body
-          e = new Error(data);
-          e.messageBody = data;
-        }
-        e.statusCode = res.statusCode;
-
-        // auto-refresh support
-        if(e.errorCode && e.errorCode === 'INVALID_SESSION_ID' && self.autoRefresh === true && opts.oauth.refresh_token && !opts._retryCount) {
-          opts._retryCount = 1;
-          Connection.prototype.refreshToken.call(self, { oauth: opts.oauth }, function(err2, res2) {
-            if(err2) {
-              return callback(err2, null);
-            } else {
-              _.assign(opts.oauth, res2);
-              return Connection.prototype._apiRequest.call(self, opts, callback);
-            }
-          });
-        } else {
-          return callback(e, null);  
-        }
-
-      } else {
-        // we don't know what happened
-        return callback(new Error('Salesforce returned no body and status code ' + res.statusCode));
-      }
-
-    };
-
-    if(res.headers && res.headers['content-encoding'] === 'gzip' && body) {
-      //  response is compressed - decompress it
-      zlib.gunzip(body, function(err, data) {
-        if (err) return callback(err);
-        processResponse(data);
-      });
-    } else {
-      processResponse(body);
-    }
+    // salesforce returned an error with a body
+    if(body) {
+      var e = new Error(body[0].message)
+      e.errorCode = body[0].errorCode;
+      e.statusCode = res.statusCode;
+      e.messageBody = body[0].message;
+      return callback(e, null);
+    } 
+    
+    // we don't know what happened
+    return callback(new Error('Salesforce returned no body and status code ' + res.statusCode));
 
   });
 }
 
 // exports
 
-module.exports.util = util;
-
-// plugin system
-
-function Plugin(opts) {
-  this.namespace = opts.namespace;
-  this._fns = {};
-  this.util = _.clone(util);
-}
-
-Plugin.prototype.fn = function(fnName, fn) {
-  if(typeof fn !== 'function') {
-    throw new Error('invalid function provided');
-  }
-  if(typeof fnName !== 'string') {
-    throw new Error('invalid function name provided');
-  }
-  this._fns[fnName] = fn;
-}
-
-module.exports.plugin = function(opts) {
-  if(typeof opts === 'string') {
-    opts = { namespace: opts };
-  }
-  if(!opts || !opts.namespace) {
-    throw new Error('no namespace provided for plugin')
-  }
-  opts = _.defaults(opts, {
-    override: false
-  });
-  if(plugins[opts.namespace] && !opts.override === true) {
-    throw new Error('a plugin with namespace ' + opts.namespace + ' already exists');
-  }
-  plugins[opts.namespace] = new Plugin(opts);
-  return plugins[opts.namespace];
-}
-
-// connection creation
-
 module.exports.createConnection = function(opts) {
   return new Connection(opts);
 }
 
 module.exports.createSObject = function(type, fields) {
-  var data = fields || {};
-  data.attributes = {
-    type: type
+  var data = {
+    attributes: {}
   }
+  data.attributes.type = type;
   var rec = new Record(data);
+  if(fields) {
+    for(var key in fields) {
+      rec[key] = fields[key];
+    }
+  }
   return rec;
 }
 
