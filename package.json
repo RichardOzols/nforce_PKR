@@ -15,7 +15,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git://github.com/kevinohara80/nforce.git"
+    "url": "git://github.com/RichardOzols/nforce_PKR.git"
   },
   "main": "index.js",
   "dependencies": {
